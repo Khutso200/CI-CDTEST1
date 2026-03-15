@@ -1,0 +1,21 @@
+# =============================================================
+# ansible/requirements.yml
+# Ansible Galaxy collections for network automation
+# Install with: ansible-galaxy collection install -r ansible/requirements.yml
+# =============================================================
+
+collections:
+  - name: cisco.ios          # IOS-XE routers and switches
+    version: ">=4.6.0"
+
+  - name: cisco.nxos         # NX-OS Nexus switches
+    version: ">=4.4.0"
+
+  - name: cisco.asa          # Cisco ASA / FTD
+    version: ">=4.0.0"
+
+  - name: ansible.netcommon  # shared network utilities
+    version: ">=5.1.0"
+
+  - name: ansible.utils      # network validation helpers
+    version: ">=2.10.0"

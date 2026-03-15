@@ -1,0 +1,64 @@
+# =============================================================
+# ansible/rollback.yml
+# Emergency rollback — restores last known good config
+# Usage: ansible-playbook ansible/rollback.yml -e "backup_date=2026-03-09"
+# =============================================================
+
+---
+- name: Rollback IOS-XE configs
+  hosts: iosxe
+  gather_facts: no
+
+  vars:
+    backup_file: "reports/backup/{{ inventory_hostname }}_{{ backup_date }}.cfg"
+
+  tasks:
+    - name: Check backup file exists
+      ansible.builtin.stat:
+        path: "{{ backup_file }}"
+      register: backup_stat
+      delegate_to: localhost
+
+    - name: Fail if no backup found
+      ansible.builtin.fail:
+        msg: "No backup found at {{ backup_file }}"
+      when: not backup_stat.stat.exists
+
+    - name: Push backup config to device
+      cisco.ios.ios_config:
+        src: "{{ backup_file }}"
+      notify: save config
+
+  handlers:
+    - name: save config
+      cisco.ios.ios_command:
+        commands: "write memory"
+
+- name: Rollback NX-OS configs
+  hosts: nxos
+  gather_facts: no
+
+  vars:
+    backup_file: "reports/backup/{{ inventory_hostname }}_{{ backup_date }}.cfg"
+
+  tasks:
+    - name: Check backup file exists
+      ansible.builtin.stat:
+        path: "{{ backup_file }}"
+      register: backup_stat
+      delegate_to: localhost
+
+    - name: Fail if no backup found
+      ansible.builtin.fail:
+        msg: "No backup found at {{ backup_file }}"
+      when: not backup_stat.stat.exists
+
+    - name: Push backup config to device
+      cisco.nxos.nxos_config:
+        src: "{{ backup_file }}"
+      notify: save config
+
+  handlers:
+    - name: save config
+      cisco.nxos.nxos_command:
+        commands: "copy running-config startup-config"

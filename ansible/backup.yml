@@ -1,0 +1,38 @@
+# =============================================================
+# ansible/backup.yml
+# Backup all device configs before making changes
+# Usage: ansible-playbook ansible/backup.yml
+# =============================================================
+
+---
+- name: Backup IOS-XE configs
+  hosts: iosxe
+  gather_facts: no
+
+  tasks:
+    - name: Get running config
+      cisco.ios.ios_command:
+        commands: "show running-config"
+      register: config_output
+
+    - name: Save config to file
+      ansible.builtin.copy:
+        content: "{{ config_output.stdout[0] }}"
+        dest: "reports/backup/{{ inventory_hostname }}_{{ ansible_date_time.date }}.cfg"
+      delegate_to: localhost
+
+- name: Backup NX-OS configs
+  hosts: nxos
+  gather_facts: no
+
+  tasks:
+    - name: Get running config
+      cisco.nxos.nxos_command:
+        commands: "show running-config"
+      register: config_output
+
+    - name: Save config to file
+      ansible.builtin.copy:
+        content: "{{ config_output.stdout[0] }}"
+        dest: "reports/backup/{{ inventory_hostname }}_{{ ansible_date_time.date }}.cfg"
+      delegate_to: localhost

@@ -1,0 +1,92 @@
+# =============================================================
+# pyats/testbed.yaml
+# pyATS testbed — connects to all devices for structured testing
+# Uses %ENV{} to read from environment variables / GitHub Secrets
+# =============================================================
+
+testbed:
+  name: Cisco-Network-Lab
+  credentials:
+    default:
+      username: "%ENV{NETWORK_USERNAME}"
+      password: "%ENV{NETWORK_PASSWORD}"
+    enable:
+      password: "%ENV{ENABLE_PASSWORD}"
+
+devices:
+
+  # ── IOS-XE Router 01 ───────────────────────────────────────
+  iosxe-router-01:
+    alias: router01
+    type: router
+    os: iosxe
+    platform: csr1000v
+    connections:
+      cli:
+        protocol: ssh
+        ip: "%ENV{IOSXE_R1_IP}"
+        port: 22
+
+  # ── IOS-XE Router 02 ───────────────────────────────────────
+  iosxe-router-02:
+    alias: router02
+    type: router
+    os: iosxe
+    platform: csr1000v
+    connections:
+      cli:
+        protocol: ssh
+        ip: "%ENV{IOSXE_R2_IP}"
+        port: 22
+
+  # ── IOS-XE Switch 01 ───────────────────────────────────────
+  iosxe-switch-01:
+    alias: switch01
+    type: switch
+    os: iosxe
+    platform: cat9k
+    connections:
+      cli:
+        protocol: ssh
+        ip: "%ENV{IOSXE_SW1_IP}"
+        port: 22
+
+  # ── NX-OS Switch 01 ────────────────────────────────────────
+  nxos-switch-01:
+    alias: nxos01
+    type: switch
+    os: nxos
+    platform: n9k
+    connections:
+      cli:
+        protocol: ssh
+        ip: "%ENV{NXOS_SW1_IP}"
+        port: 22
+
+  # ── NX-OS Switch 02 ────────────────────────────────────────
+  nxos-switch-02:
+    alias: nxos02
+    type: switch
+    os: nxos
+    platform: n9k
+    connections:
+      cli:
+        protocol: ssh
+        ip: "%ENV{NXOS_SW2_IP}"
+        port: 22
+
+  # ── FTD Firewall ───────────────────────────────────────────
+  ftd-firewall-01:
+    alias: ftd01
+    type: firewall
+    os: ftd
+    platform: ftd
+    credentials:
+      default:
+        username: "%ENV{FTD_USERNAME}"
+        password: "%ENV{FTD_PASSWORD}"
+    connections:
+      cli:
+        protocol: ssh
+        ip: "%ENV{FTD_IP}"
+        port: 22

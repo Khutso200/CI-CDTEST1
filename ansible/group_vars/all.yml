@@ -1,0 +1,38 @@
+# =============================================================
+# ansible/group_vars/all.yml
+# Variables shared across all device groups
+# =============================================================
+
+# ── NTP ──────────────────────────────────────────────────────
+ntp_servers:
+  - 196.4.160.4
+  - 196.4.160.5
+
+# ── Syslog ───────────────────────────────────────────────────
+syslog_server: "10.0.10.100"
+syslog_severity: "informational"
+
+# ── SNMP ─────────────────────────────────────────────────────
+snmp_community_ro: "{{ lookup('env', 'SNMP_COMMUNITY') }}"
+snmp_location: "Tectura-Lab-Johannesburg"
+snmp_contact: "noc@tectura.co.za"
+
+# ── VLANs ────────────────────────────────────────────────────
+vlans:
+  - id: 10
+    name: MGMT
+  - id: 20
+    name: DATA
+  - id: 30
+    name: VOICE
+  - id: 40
+    name: DMZ
+
+# ── DNS ──────────────────────────────────────────────────────
+dns_servers:
+  - 8.8.8.8
+  - 8.8.4.4
+
+# ── Management ───────────────────────────────────────────────
+mgmt_vlan: 10
+mgmt_network: "10.0.10.0/24"

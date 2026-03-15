@@ -1,0 +1,22 @@
+# =============================================================
+# requirements.txt
+# =============================================================
+
+# Ansible
+ansible>=8.0.0
+ansible-lint>=6.0.0
+ansible-pylibssh>=1.1.0    # faster SSH for Ansible
+
+# pyATS & Genie
+pyats>=23.0
+genie>=23.0
+
+# Testing
+pytest>=7.4.0
+pytest-html>=4.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+paramiko>=3.0.0
+netmiko>=4.3.0

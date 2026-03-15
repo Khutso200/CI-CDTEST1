@@ -1,0 +1,147 @@
+# =============================================================
+# ansible/roles/iosxe/tasks/main.yml
+# IOS-XE configuration tasks
+# =============================================================
+
+---
+
+# ── Hostname & Domain ─────────────────────────────────────────
+- name: Set hostname and domain
+  cisco.ios.ios_system:
+    hostname: "{{ inventory_hostname }}"
+    domain_name: "{{ domain_name }}"
+    name_servers: "{{ dns_servers }}"
+  notify: save config
+
+# ── SSH & Security ────────────────────────────────────────────
+- name: Generate RSA key for SSH
+  cisco.ios.ios_command:
+    commands:
+      - "crypto key generate rsa modulus 2048"
+  ignore_errors: yes
+
+- name: Configure SSH version 2
+  cisco.ios.ios_config:
+    lines:
+      - "ip ssh version {{ ssh_version }}"
+      - "ip ssh time-out {{ ssh_timeout }}"
+      - "ip ssh authentication-retries {{ ssh_retries }}"
+
+- name: Disable Telnet on VTY lines
+  cisco.ios.ios_config:
+    lines:
+      - "transport input ssh"
+      - "login local"
+      - "exec-timeout 10 0"
+    parents: "line vty 0 4"
+  notify: save config
+
+# ── AAA ──────────────────────────────────────────────────────
+- name: Configure AAA
+  cisco.ios.ios_config:
+    lines:
+      - "aaa new-model"
+      - "aaa authentication login default local"
+      - "aaa authorization exec default local"
+  when: aaa_enabled
+  notify: save config
+
+# ── VLANs ────────────────────────────────────────────────────
+- name: Configure VLANs
+  cisco.ios.ios_vlans:
+    config:
+      - vlan_id: "{{ item.id }}"
+        name: "{{ item.name }}"
+        state: active
+    state: merged
+  loop: "{{ vlans }}"
+  notify: save config
+
+# ── Loopback Interface ────────────────────────────────────────
+- name: Configure Loopback0
+  cisco.ios.ios_interfaces:
+    config:
+      - name: "Loopback{{ loopback_interface }}"
+        description: "Router-ID — Managed by Ansible"
+        enabled: true
+    state: merged
+  notify: save config
+
+- name: Set Loopback0 IP address
+  cisco.ios.ios_l3_interfaces:
+    config:
+      - name: "Loopback{{ loopback_interface }}"
+        ipv4:
+          - address: "{{ loopback_ip }}/32"
+    state: merged
+  notify: save config
+
+# ── OSPF ─────────────────────────────────────────────────────
+- name: Configure OSPF
+  cisco.ios.ios_ospfv2:
+    config:
+      processes:
+        - process_id: "{{ ospf_process_id }}"
+          router_id: "{{ loopback_ip }}"
+          network:
+            - address: "{{ ospf_network }}"
+              wildcard_bits: "{{ ospf_wildcard }}"
+              area: "{{ ospf_area }}"
+    state: merged
+  notify: save config
+
+# ── NTP ──────────────────────────────────────────────────────
+- name: Configure NTP servers
+  cisco.ios.ios_ntp_global:
+    config:
+      servers:
+        - server: "{{ item }}"
+          prefer: "{{ loop.first }}"
+    state: merged
+  loop: "{{ ntp_servers }}"
+  notify: save config
+
+# ── Logging ──────────────────────────────────────────────────
+- name: Configure syslog
+  cisco.ios.ios_logging_global:
+    config:
+      hosts:
+        - hostname: "{{ syslog_server }}"
+          severity: "{{ syslog_severity }}"
+    state: merged
+  notify: save config
+
+# ── SNMP ─────────────────────────────────────────────────────
+- name: Configure SNMP
+  cisco.ios.ios_config:
+    lines:
+      - "snmp-server community {{ snmp_community_ro }} RO"
+      - "snmp-server location {{ snmp_location }}"
+      - "snmp-server contact {{ snmp_contact }}"
+  notify: save config
+
+# ── Verify config was applied ─────────────────────────────────
+- name: Verify SSH is enabled
+  cisco.ios.ios_command:
+    commands: "show ip ssh"
+  register: ssh_output
+
+- name: Assert SSH version 2
+  ansible.builtin.assert:
+    that:
+      - "'SSH Enabled' in ssh_output.stdout[0]"
+      - "'version 2' in ssh_output.stdout[0] or '2.0' in ssh_output.stdout[0]"
+    fail_msg: "SSH v2 not configured correctly on {{ inventory_hostname }}"
+    success_msg: "SSH v2 confirmed on {{ inventory_hostname }}"
+
+- name: Verify NTP is synchronized
+  cisco.ios.ios_command:
+    commands: "show ntp status"
+  register: ntp_output
+
+- name: Assert NTP synchronized
+  ansible.builtin.assert:
+    that:
+      - "'synchronized' in ntp_output.stdout[0]"
+    fail_msg: "NTP not synchronized on {{ inventory_hostname }}"
+    success_msg: "NTP synchronized on {{ inventory_hostname }}"

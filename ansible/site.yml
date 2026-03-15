@@ -1,0 +1,24 @@
+# =============================================================
+# ansible/site.yml
+# Master playbook — runs all device roles
+# Usage: ansible-playbook ansible/site.yml
+# =============================================================
+
+---
+- name: Configure IOS-XE Devices
+  hosts: iosxe
+  gather_facts: no
+  roles:
+    - role: iosxe
+
+- name: Configure NX-OS Devices
+  hosts: nxos
+  gather_facts: no
+  roles:
+    - role: nxos
+
+- name: Configure FTD via FMC
+  hosts: localhost        # FTD is configured via FMC REST API
+  gather_facts: no
+  roles:
+    - role: ftd
