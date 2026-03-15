@@ -1,0 +1,526 @@
+# =============================================================
+# .github/workflows/network-pipeline.yml
+#
+# Network Automation CI/CD Pipeline
+# Stack: GitHub Actions + Ansible + pyATS + Terraform
+#
+# ┌─────────────────────────────────────────────────────────┐
+# │  PIPELINE FLOW                                          │
+# │                                                         │
+# │  Push / PR                                              │
+# │      ↓                                                  │
+# │  1. LINT          → ansible-lint + terraform fmt        │
+# │      ↓                                                  │
+# │  2. BACKUP        → save configs before changes         │
+# │      ↓                                                  │
+# │  3. PRE-CHANGE    → pyATS snapshots device state        │
+# │      ↓                                                  │
+# │  4. TF PLAN       → preview infrastructure changes      │
+# │      ↓                                                  │
+# │  5. DEPLOY        → Ansible pushes config changes       │
+# │      ↓ (manual trigger only)                            │
+# │  6. TF APPLY      → Terraform applies infra changes     │
+# │      ↓                                                  │
+# │  7. POST-CHANGE   → pyATS validates everything          │
+# │      ↓                                                  │
+# │  8. NOTIFY        → MS Teams pass/fail                  │
+# └─────────────────────────────────────────────────────────┘
+# =============================================================
+
+name: Network Automation Pipeline
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - 'ansible/**'
+      - 'terraform/**'
+      - 'pyats/**'
+      - 'inventory/**'
+
+  pull_request:
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      run_deploy:
+        description: 'Deploy config changes to devices?'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'lab'
+        type: choice
+        options: ['lab', 'prod']
+
+# ── Global env ───────────────────────────────────────────────
+env:
+  PYTHON_VERSION:    "3.11"
+  TERRAFORM_VERSION: "1.6.0"
+  TF_ENV:            ${{ github.event.inputs.environment || 'lab' }}
+
+
+# =============================================================
+# JOB 1 — LINT
+# Check Ansible playbooks and Terraform code before anything
+# runs on real devices
+# =============================================================
+jobs:
+
+  lint:
+    name: "Lint and Validate"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Ansible Galaxy collections
+        run: ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # ── Ansible Lint ─────────────────────────────────────
+      - name: Lint Ansible playbooks
+        run: |
+          ansible-lint ansible/site.yml \
+            ansible/backup.yml \
+            ansible/rollback.yml
+        continue-on-error: true
+
+      # ── Ansible Syntax Check ─────────────────────────────
+      - name: Ansible syntax check
+        run: |
+          ansible-playbook ansible/site.yml \
+            -i inventory/hosts.ini \
+            --syntax-check
+        continue-on-error: true
+        env:
+          NETWORK_USERNAME: ${{ secrets.NETWORK_USERNAME }}
+          NETWORK_PASSWORD: ${{ secrets.NETWORK_PASSWORD }}
+          ENABLE_PASSWORD:  ${{ secrets.ENABLE_PASSWORD }}
+          IOSXE_R1_IP:      ${{ secrets.IOSXE_R1_IP }}
+          IOSXE_R2_IP:      ${{ secrets.IOSXE_R2_IP }}
+          IOSXE_SW1_IP:     ${{ secrets.IOSXE_SW1_IP }}
+          NXOS_SW1_IP:      ${{ secrets.NXOS_SW1_IP }}
+          NXOS_SW2_IP:      ${{ secrets.NXOS_SW2_IP }}
+          FTD_IP:           ${{ secrets.FTD_IP }}
+          FTD_USERNAME:     ${{ secrets.FTD_USERNAME }}
+          FTD_PASSWORD:     ${{ secrets.FTD_PASSWORD }}
+          FMC_IP:           ${{ secrets.FMC_IP }}
+          FMC_USERNAME:     ${{ secrets.FMC_USERNAME }}
+          FMC_PASSWORD:     ${{ secrets.FMC_PASSWORD }}
+
+      # ── Terraform Format Check ────────────────────────────
+      - name: Terraform format check
+        run: terraform fmt -check -recursive terraform/
+        continue-on-error: true
+
+      # ── Terraform Validate ────────────────────────────────
+      - name: Terraform init (no backend)
+        run: |
+          terraform -chdir=terraform/environments/${{ env.TF_ENV }} \
+            init -backend=false
+        continue-on-error: true
+
+      - name: Terraform validate
+        run: |
+          terraform -chdir=terraform/environments/${{ env.TF_ENV }} validate
+        continue-on-error: true
+
+
+# =============================================================
+# JOB 2 — BACKUP
+# Save device configs BEFORE any changes are made
+# Provides rollback capability if deploy fails
+# =============================================================
+
+  backup:
+    name: "Backup Device Configs"
+    runs-on: ubuntu-latest
+    needs: lint
+    if: github.event.inputs.run_deploy == 'true' || github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Create backup directory
+        run: mkdir -p reports/backup
+
+      - name: Backup all device configs
+        run: |
+          ansible-playbook ansible/backup.yml \
+            -i inventory/hosts.ini \
+            -v
+        env:
+          NETWORK_USERNAME: ${{ secrets.NETWORK_USERNAME }}
+          NETWORK_PASSWORD: ${{ secrets.NETWORK_PASSWORD }}
+          ENABLE_PASSWORD:  ${{ secrets.ENABLE_PASSWORD }}
+          IOSXE_R1_IP:      ${{ secrets.IOSXE_R1_IP }}
+          IOSXE_R2_IP:      ${{ secrets.IOSXE_R2_IP }}
+          IOSXE_SW1_IP:     ${{ secrets.IOSXE_SW1_IP }}
+          NXOS_SW1_IP:      ${{ secrets.NXOS_SW1_IP }}
+          NXOS_SW2_IP:      ${{ secrets.NXOS_SW2_IP }}
+
+      - name: Upload config backups
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-backups-${{ github.run_number }}
+          path: reports/backup/
+          retention-days: 30
+
+
+# =============================================================
+# JOB 3 — PRE-CHANGE SNAPSHOT (pyATS)
+# Capture current device state BEFORE changes
+# Used to compare against post-change state
+# =============================================================
+
+  pre-change:
+    name: "Pre-Change Snapshot (pyATS)"
+    runs-on: ubuntu-latest
+    needs: backup
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create snapshot directory
+        run: mkdir -p reports/snapshots
+
+      - name: Run pyATS pre-change snapshot
+        run: |
+          pytest pyats/tests/test_prechange.py \
+            -v \
+            --tb=short \
+            --html=reports/pre-change-report.html \
+            --self-contained-html
+        continue-on-error: true
+        env:
+          NETWORK_USERNAME: ${{ secrets.NETWORK_USERNAME }}
+          NETWORK_PASSWORD: ${{ secrets.NETWORK_PASSWORD }}
+          ENABLE_PASSWORD:  ${{ secrets.ENABLE_PASSWORD }}
+          IOSXE_R1_IP:      ${{ secrets.IOSXE_R1_IP }}
+          IOSXE_R2_IP:      ${{ secrets.IOSXE_R2_IP }}
+          IOSXE_SW1_IP:     ${{ secrets.IOSXE_SW1_IP }}
+          NXOS_SW1_IP:      ${{ secrets.NXOS_SW1_IP }}
+          NXOS_SW2_IP:      ${{ secrets.NXOS_SW2_IP }}
+          FTD_IP:           ${{ secrets.FTD_IP }}
+          FTD_USERNAME:     ${{ secrets.FTD_USERNAME }}
+          FTD_PASSWORD:     ${{ secrets.FTD_PASSWORD }}
+          MGMT_GW:          ${{ secrets.MGMT_GW }}
+
+      - name: Upload snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-change-snapshots
+          path: reports/snapshots/
+
+
+# =============================================================
+# JOB 4 — TERRAFORM PLAN
+# Preview infrastructure changes — safe, no changes applied
+# Posts plan output as PR comment
+# =============================================================
+
+  terraform-plan:
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform/environments/${{ env.TF_ENV }} init
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform plan
+        run: |
+          terraform -chdir=terraform/environments/${{ env.TF_ENV }} plan \
+            -no-color \
+            -out=tfplan 2>&1 | tee terraform-plan.txt
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID:         ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:     ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TF_VAR_network_username:   ${{ secrets.NETWORK_USERNAME }}
+          TF_VAR_network_password:   ${{ secrets.NETWORK_PASSWORD }}
+          TF_VAR_fmc_username:       ${{ secrets.FMC_USERNAME }}
+          TF_VAR_fmc_password:       ${{ secrets.FMC_PASSWORD }}
+          TF_VAR_iosxe_r1_ip:        ${{ secrets.IOSXE_R1_IP }}
+          TF_VAR_nxos_sw1_ip:        ${{ secrets.NXOS_SW1_IP }}
+          TF_VAR_fmc_ip:             ${{ secrets.FMC_IP }}
+          TF_VAR_syslog_server:      ${{ secrets.SYSLOG_SERVER }}
+          TF_VAR_snmp_community:     ${{ secrets.SNMP_COMMUNITY }}
+
+      - name: Upload Terraform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform-plan.txt
+
+
+# =============================================================
+# JOB 5 — ANSIBLE DEPLOY
+# Push config changes to all devices via Ansible
+# Only runs on manual trigger with run_deploy=true
+# =============================================================
+
+  ansible-deploy:
+    name: "Ansible Deploy Config"
+    runs-on: ubuntu-latest
+    needs: [pre-change, terraform-plan]
+    if: github.event.inputs.run_deploy == 'true' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Deploy IOS-XE config
+        run: |
+          ansible-playbook ansible/site.yml \
+            -i inventory/hosts.ini \
+            --limit iosxe \
+            -v
+        env:
+          NETWORK_USERNAME: ${{ secrets.NETWORK_USERNAME }}
+          NETWORK_PASSWORD: ${{ secrets.NETWORK_PASSWORD }}
+          ENABLE_PASSWORD:  ${{ secrets.ENABLE_PASSWORD }}
+          IOSXE_R1_IP:      ${{ secrets.IOSXE_R1_IP }}
+          IOSXE_R2_IP:      ${{ secrets.IOSXE_R2_IP }}
+          IOSXE_SW1_IP:     ${{ secrets.IOSXE_SW1_IP }}
+          SNMP_COMMUNITY:   ${{ secrets.SNMP_COMMUNITY }}
+
+      - name: Deploy NX-OS config
+        run: |
+          ansible-playbook ansible/site.yml \
+            -i inventory/hosts.ini \
+            --limit nxos \
+            -v
+        env:
+          NETWORK_USERNAME: ${{ secrets.NETWORK_USERNAME }}
+          NETWORK_PASSWORD: ${{ secrets.NETWORK_PASSWORD }}
+          NXOS_SW1_IP:      ${{ secrets.NXOS_SW1_IP }}
+          NXOS_SW2_IP:      ${{ secrets.NXOS_SW2_IP }}
+          SNMP_COMMUNITY:   ${{ secrets.SNMP_COMMUNITY }}
+
+      - name: Deploy FTD policy via FMC
+        run: |
+          ansible-playbook ansible/site.yml \
+            -i inventory/hosts.ini \
+            --limit localhost \
+            -v
+        env:
+          FMC_IP:       ${{ secrets.FMC_IP }}
+          FMC_USERNAME: ${{ secrets.FMC_USERNAME }}
+          FMC_PASSWORD: ${{ secrets.FMC_PASSWORD }}
+          FTD_IP:       ${{ secrets.FTD_IP }}
+
+
+# =============================================================
+# JOB 6 — TERRAFORM APPLY
+# Apply infrastructure changes after Ansible deploy succeeds
+# Only runs on manual trigger with run_deploy=true
+# =============================================================
+
+  terraform-apply:
+    name: "Terraform Apply"
+    runs-on: ubuntu-latest
+    needs: ansible-deploy
+    if: github.event.inputs.run_deploy == 'true' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform/environments/${{ env.TF_ENV }} init
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform apply
+        run: |
+          terraform -chdir=terraform/environments/${{ env.TF_ENV }} apply \
+            -auto-approve
+        env:
+          AWS_ACCESS_KEY_ID:         ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:     ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TF_VAR_network_username:   ${{ secrets.NETWORK_USERNAME }}
+          TF_VAR_network_password:   ${{ secrets.NETWORK_PASSWORD }}
+          TF_VAR_fmc_username:       ${{ secrets.FMC_USERNAME }}
+          TF_VAR_fmc_password:       ${{ secrets.FMC_PASSWORD }}
+          TF_VAR_iosxe_r1_ip:        ${{ secrets.IOSXE_R1_IP }}
+          TF_VAR_nxos_sw1_ip:        ${{ secrets.NXOS_SW1_IP }}
+          TF_VAR_fmc_ip:             ${{ secrets.FMC_IP }}
+          TF_VAR_syslog_server:      ${{ secrets.SYSLOG_SERVER }}
+          TF_VAR_snmp_community:     ${{ secrets.SNMP_COMMUNITY }}
+
+
+# =============================================================
+# JOB 7 — POST-CHANGE VALIDATION (pyATS)
+# Validate device state AFTER all changes
+# Compares against pre-change snapshots
+# =============================================================
+
+  post-change:
+    name: "Post-Change Validation (pyATS)"
+    runs-on: ubuntu-latest
+    needs: [ansible-deploy, terraform-apply]
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download pre-change snapshots
+        uses: actions/download-artifact@v4
+        with:
+          name: pre-change-snapshots
+          path: reports/snapshots/
+        continue-on-error: true
+
+      - name: Run pyATS post-change validation
+        run: |
+          pytest pyats/tests/test_postchange.py \
+            -v \
+            --tb=short \
+            --html=reports/post-change-report.html \
+            --self-contained-html
+        env:
+          NETWORK_USERNAME: ${{ secrets.NETWORK_USERNAME }}
+          NETWORK_PASSWORD: ${{ secrets.NETWORK_PASSWORD }}
+          ENABLE_PASSWORD:  ${{ secrets.ENABLE_PASSWORD }}
+          IOSXE_R1_IP:      ${{ secrets.IOSXE_R1_IP }}
+          IOSXE_R2_IP:      ${{ secrets.IOSXE_R2_IP }}
+          IOSXE_SW1_IP:     ${{ secrets.IOSXE_SW1_IP }}
+          NXOS_SW1_IP:      ${{ secrets.NXOS_SW1_IP }}
+          NXOS_SW2_IP:      ${{ secrets.NXOS_SW2_IP }}
+          FTD_IP:           ${{ secrets.FTD_IP }}
+          FTD_USERNAME:     ${{ secrets.FTD_USERNAME }}
+          FTD_PASSWORD:     ${{ secrets.FTD_PASSWORD }}
+          MGMT_GW:          ${{ secrets.MGMT_GW }}
+
+      - name: Upload post-change report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-change-report
+          path: reports/post-change-report.html
+
+
+# =============================================================
+# JOB 8 — NOTIFY
+# Send MS Teams notification with pipeline results
+# =============================================================
+
+  notify:
+    name: "Notify Teams"
+    runs-on: ubuntu-latest
+    needs: [lint, pre-change, ansible-deploy, post-change]
+    if: always()
+
+    steps:
+      - name: Set pipeline status
+        id: status
+        run: |
+          LINT="${{ needs.lint.result }}"
+          PRE="${{ needs.pre-change.result }}"
+          DEPLOY="${{ needs.ansible-deploy.result }}"
+          POST="${{ needs.post-change.result }}"
+
+          if [[ "$LINT" == "success" && "$POST" != "failure" ]]; then
+            echo "status=PASSED ✅" >> $GITHUB_OUTPUT
+            echo "color=good"       >> $GITHUB_OUTPUT
+          else
+            echo "status=FAILED ❌" >> $GITHUB_OUTPUT
+            echo "color=danger"     >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify MS Teams
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token:         ${{ secrets.GITHUB_TOKEN }}
+          ms-teams-webhook:     ${{ secrets.TEAMS_WEBHOOK_URL }}
+          notification-summary: |
+            Network Automation Pipeline: ${{ steps.status.outputs.status }}
+            Branch: ${{ github.ref_name }}
+            Lint: ${{ needs.lint.result }}
+            Pre-Change: ${{ needs.pre-change.result }}
+            Deploy: ${{ needs.ansible-deploy.result }}
+            Post-Change: ${{ needs.post-change.result }}
+          notification-color: ${{ steps.status.outputs.color }}
+          timezone: Africa/Johannesburg
+        continue-on-error: true
